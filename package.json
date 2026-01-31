@@ -1,0 +1,38 @@
+{
+  "name": "@connectome/grpc-common",
+  "version": "1.0.0",
+  "description": "gRPC protocol definitions and serialization helpers for Connectome",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "proto": "grpc_tools_node_protoc --plugin=protoc-gen-ts=./node_modules/.bin/protoc-gen-ts --ts_out=grpc_js:./src/generated --grpc_out=grpc_js:./src/generated --proto_path=./proto ./proto/*.proto",
+    "proto:js": "grpc_tools_node_protoc --js_out=import_style=commonjs,binary:./src/generated --grpc_out=grpc_js:./src/generated --proto_path=./proto ./proto/*.proto",
+    "clean": "rm -rf dist src/generated",
+    "prepublishOnly": "npm run build"
+  },
+  "exports": {
+    ".": {
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./proto": {
+      "require": "./dist/generated/connectome.js",
+      "types": "./dist/generated/connectome.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "proto"
+  ],
+  "dependencies": {
+    "@grpc/grpc-js": "^1.10.0",
+    "@grpc/proto-loader": "^0.7.10",
+    "google-protobuf": "^3.21.2"
+  },
+  "devDependencies": {
+    "@types/google-protobuf": "^3.15.12",
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3"
+  }
+}

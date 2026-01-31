@@ -1,0 +1,320 @@
+syntax = "proto3";
+
+package connectome;
+
+option java_package = "com.connectome.grpc";
+option go_package = "connectome/grpc";
+
+// ============================================
+// CONNECTOME SERVICE
+// ============================================
+
+service ConnectomeService {
+  // Health check
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // Emit an event to the Space
+  rpc EmitEvent(EmitEventRequest) returns (FrameResult);
+
+  // Subscribe to facet changes (streaming)
+  rpc SubscribeToFacets(SubscribeRequest) returns (stream FacetDelta);
+
+  // Register an agent with the system
+  rpc RegisterAgent(RegisterAgentRequest) returns (AgentHandle);
+
+  // Get rendered context for an agent
+  rpc GetContext(GetContextRequest) returns (RenderedContext);
+
+  // Create a new stream
+  rpc CreateStream(CreateStreamRequest) returns (StreamRef);
+
+  // Get current VEIL state snapshot
+  rpc GetStateSnapshot(GetStateSnapshotRequest) returns (StateSnapshot);
+
+  // Get frames by sequence range
+  rpc GetFrames(GetFramesRequest) returns (FramesResponse);
+
+  // Activate an agent for a stream
+  rpc ActivateAgent(ActivateAgentRequest) returns (ActivationResult);
+}
+
+// ============================================
+// HEALTH
+// ============================================
+
+message HealthRequest {
+  string client_id = 1;
+}
+
+message HealthResponse {
+  bool healthy = 1;
+  int64 current_sequence = 2;
+  int32 active_streams = 3;
+  int32 active_agents = 4;
+  int64 uptime_ms = 5;
+}
+
+// ============================================
+// EVENTS
+// ============================================
+
+message EmitEventRequest {
+  SpaceEvent event = 1;
+  bool wait_for_frame = 2;  // If true, wait for frame to complete
+}
+
+message SpaceEvent {
+  string topic = 1;
+  ComponentRef source = 2;
+  bytes payload_json = 3;  // JSON-encoded payload for flexibility
+  int64 timestamp = 4;
+  EventPriority priority = 5;
+  map<string, string> metadata = 6;
+  bool sync = 7;  // If true, process in sub-cycle
+}
+
+enum EventPriority {
+  PRIORITY_NORMAL = 0;
+  PRIORITY_LOW = 1;
+  PRIORITY_HIGH = 2;
+  PRIORITY_IMMEDIATE = 3;
+}
+
+message ComponentRef {
+  string component_id = 1;
+  repeated string component_path = 2;
+  string component_type = 3;
+}
+
+message FrameResult {
+  bool success = 1;
+  int64 sequence = 2;
+  string frame_uuid = 3;
+  repeated FacetDelta deltas = 4;
+  string error = 5;
+}
+
+// ============================================
+// SUBSCRIPTIONS
+// ============================================
+
+message SubscribeRequest {
+  string client_id = 1;
+  repeated FacetFilter filters = 2;
+  bool include_existing = 3;  // Send current state on subscribe
+  int64 from_sequence = 4;    // Resume from sequence (0 = current)
+  repeated string stream_ids = 5;  // Filter by streams (empty = all)
+}
+
+message FacetFilter {
+  repeated string types = 1;         // Facet types to match
+  map<string, string> aspect_match = 2;  // Aspect key-value matches
+  map<string, string> attribute_match = 3;  // Attribute key-value matches
+}
+
+message FacetDelta {
+  DeltaType type = 1;
+  Facet facet = 2;
+  Facet old_facet = 3;  // For changes
+  int64 sequence = 4;
+  string frame_uuid = 5;
+}
+
+enum DeltaType {
+  DELTA_ADDED = 0;
+  DELTA_CHANGED = 1;
+  DELTA_REMOVED = 2;
+}
+
+// ============================================
+// FACETS
+// ============================================
+
+message Facet {
+  string id = 1;
+  string type = 2;
+  bytes state_json = 3;      // JSON-encoded state for flexibility
+  string content = 4;        // Human-readable content
+  repeated string tags = 5;
+
+  // Common aspects
+  string agent_id = 6;
+  string agent_name = 7;
+  string stream_id = 8;
+  string stream_type = 9;
+  repeated string scopes = 10;
+  bool ephemeral = 11;
+
+  // Nested children
+  repeated Facet children = 12;
+
+  // Generic attributes
+  map<string, string> attributes = 13;
+
+  // Attachments for large data
+  repeated Attachment attachments = 14;
+}
+
+message Attachment {
+  string id = 1;
+  string content_type = 2;
+  oneof data {
+    bytes inline_data = 3;  // Small attachments inline
+    string url = 4;         // Large attachments as URL
+  }
+  int64 size_bytes = 5;
+  string filename = 6;
+  map<string, string> metadata = 7;
+}
+
+// ============================================
+// AGENTS
+// ============================================
+
+message RegisterAgentRequest {
+  string agent_id = 1;
+  string agent_name = 2;
+  string agent_type = 3;
+  repeated string capabilities = 4;
+  map<string, string> metadata = 5;
+}
+
+message AgentHandle {
+  string agent_id = 1;
+  string session_token = 2;  // For authenticated operations
+  bool success = 3;
+  string error = 4;
+}
+
+message ActivateAgentRequest {
+  string agent_id = 1;
+  string stream_id = 2;
+  string reason = 3;
+  ActivationPriority priority = 4;
+  map<string, string> metadata = 5;
+}
+
+enum ActivationPriority {
+  ACTIVATION_NORMAL = 0;
+  ACTIVATION_LOW = 1;
+  ACTIVATION_HIGH = 2;
+  ACTIVATION_CRITICAL = 3;
+}
+
+message ActivationResult {
+  bool success = 1;
+  string activation_id = 2;
+  string error = 3;
+}
+
+// ============================================
+// CONTEXT
+// ============================================
+
+message GetContextRequest {
+  string agent_id = 1;
+  string stream_id = 2;
+  int32 max_frames = 3;
+  int32 max_tokens = 4;
+  repeated string facet_types = 5;  // Filter by types
+}
+
+message RenderedContext {
+  string agent_id = 1;
+  string stream_id = 2;
+  bytes context_json = 3;  // Full rendered context as JSON
+  int32 token_count = 4;
+  int32 frame_count = 5;
+  double compression_ratio = 6;
+}
+
+// ============================================
+// STREAMS
+// ============================================
+
+message CreateStreamRequest {
+  string stream_id = 1;
+  string stream_type = 2;
+  map<string, string> metadata = 3;
+}
+
+message StreamRef {
+  string stream_id = 1;
+  string stream_type = 2;
+  map<string, string> metadata = 3;
+  bool success = 4;
+  string error = 5;
+}
+
+// ============================================
+// STATE
+// ============================================
+
+message GetStateSnapshotRequest {
+  int64 sequence = 1;  // 0 = current
+  repeated string facet_types = 2;  // Filter by types (empty = all)
+  repeated string stream_ids = 3;   // Filter by streams (empty = all)
+}
+
+message StateSnapshot {
+  int64 sequence = 1;
+  string timestamp = 2;
+  repeated Facet facets = 3;
+  repeated StreamInfo streams = 4;
+  repeated AgentInfo agents = 5;
+  StreamRef current_stream = 6;
+}
+
+message StreamInfo {
+  string id = 1;
+  string name = 2;
+  map<string, string> metadata = 3;
+}
+
+message AgentInfo {
+  string id = 1;
+  string name = 2;
+  string type = 3;
+  repeated string capabilities = 4;
+  map<string, string> metadata = 5;
+  string created_at = 6;
+  string last_active_at = 7;
+}
+
+// ============================================
+// FRAMES
+// ============================================
+
+message GetFramesRequest {
+  int64 from_sequence = 1;
+  int64 to_sequence = 2;  // 0 = current
+  int32 limit = 3;        // Max frames to return
+  repeated string stream_ids = 4;  // Filter by streams
+}
+
+message FramesResponse {
+  repeated Frame frames = 1;
+  int64 current_sequence = 2;
+}
+
+message Frame {
+  int64 sequence = 1;
+  string timestamp = 2;
+  string uuid = 3;
+  StreamRef active_stream = 4;
+  repeated SpaceEvent events = 5;
+  repeated VEILDelta deltas = 6;
+}
+
+message VEILDelta {
+  VEILDeltaType type = 1;
+  Facet facet = 2;
+  string facet_id = 3;
+  bytes changes_json = 4;  // For rewrite operations
+}
+
+enum VEILDeltaType {
+  VEIL_ADD_FACET = 0;
+  VEIL_REWRITE_FACET = 1;
+  VEIL_REMOVE_FACET = 2;
+}
