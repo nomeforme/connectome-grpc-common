@@ -146,7 +146,10 @@ export class ConnectomeServer extends EventEmitter {
     const ConnectomeService = (protoDescriptor as any).connectome.ConnectomeService;
 
     this.server = new grpc.Server({
-      'grpc.max_concurrent_streams': this.config.maxConcurrentStreams
+      'grpc.max_concurrent_streams': this.config.maxConcurrentStreams,
+      // Allow client keepalive pings
+      'grpc.keepalive_permit_without_calls': 1,
+      'grpc.http2.min_ping_interval_without_data_ms': 10000,
     });
 
     // Add service implementation

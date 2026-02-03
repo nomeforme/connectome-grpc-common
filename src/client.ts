@@ -29,6 +29,12 @@ export interface ConnectomeClientConfig {
   clientId: string;
   reconnectInterval?: number;
   maxReconnectAttempts?: number;
+  /** Keepalive ping interval in ms (default: 30000) */
+  keepaliveTimeMs?: number;
+  /** Keepalive ping timeout in ms (default: 5000) */
+  keepaliveTimeoutMs?: number;
+  /** Default request deadline in ms (default: 30000) */
+  defaultDeadlineMs?: number;
 }
 
 /**
@@ -98,7 +104,10 @@ export class ConnectomeClient extends EventEmitter {
       port: config.port || 50051,
       clientId: config.clientId,
       reconnectInterval: config.reconnectInterval || 5000,
-      maxReconnectAttempts: config.maxReconnectAttempts || -1 // -1 = infinite
+      maxReconnectAttempts: config.maxReconnectAttempts || -1, // -1 = infinite
+      keepaliveTimeMs: config.keepaliveTimeMs || 30000,
+      keepaliveTimeoutMs: config.keepaliveTimeoutMs || 5000,
+      defaultDeadlineMs: config.defaultDeadlineMs || 30000
     };
   }
 
@@ -121,9 +130,19 @@ export class ConnectomeClient extends EventEmitter {
 
     const address = `${this.config.host}:${this.config.port}`;
 
+    // gRPC channel options with keepalive for connection health
+    const channelOptions = {
+      'grpc.keepalive_time_ms': this.config.keepaliveTimeMs,
+      'grpc.keepalive_timeout_ms': this.config.keepaliveTimeoutMs,
+      'grpc.keepalive_permit_without_calls': 1,
+      'grpc.http2.min_time_between_pings_ms': Math.floor(this.config.keepaliveTimeMs / 2),
+      'grpc.http2.max_pings_without_data': 0,
+    };
+
     this.client = new ConnectomeService(
       address,
-      grpc.credentials.createInsecure()
+      grpc.credentials.createInsecure(),
+      channelOptions
     );
 
     // Wait for connection
@@ -173,21 +192,27 @@ export class ConnectomeClient extends EventEmitter {
   /**
    * Health check
    */
-  async health(): Promise<HealthStatus> {
+  async health(timeoutMs?: number): Promise<HealthStatus> {
+    const deadline = this.createDeadline(timeoutMs || 5000); // Short timeout for health
+
     return new Promise((resolve, reject) => {
-      this.client.Health({ clientId: this.config.clientId }, (error: any, response: any) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve({
-            healthy: response.healthy,
-            currentSequence: response.currentSequence,
-            activeStreams: response.activeStreams,
-            activeAgents: response.activeAgents,
-            uptimeMs: response.uptimeMs
-          });
+      this.client.Health(
+        { clientId: this.config.clientId },
+        { deadline },
+        (error: any, response: any) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve({
+              healthy: response.healthy,
+              currentSequence: response.currentSequence,
+              activeStreams: response.activeStreams,
+              activeAgents: response.activeAgents,
+              uptimeMs: response.uptimeMs
+            });
+          }
         }
-      });
+      );
     });
   }
 
@@ -202,6 +227,7 @@ export class ConnectomeClient extends EventEmitter {
       sync?: boolean;
       metadata?: Record<string, any>;
       waitForFrame?: boolean;
+      timeoutMs?: number;
     }
   ): Promise<FrameResult> {
     const protoEvent = createProtoEvent(
@@ -211,14 +237,20 @@ export class ConnectomeClient extends EventEmitter {
       options
     );
 
+    const deadline = this.createDeadline(options?.timeoutMs);
+
     return new Promise((resolve, reject) => {
       this.client.EmitEvent(
         {
           event: protoEvent,
           waitForFrame: options?.waitForFrame ?? true
         },
+        { deadline },
         (error: any, response: any) => {
           if (error) {
+            if (error.code === grpc.status.DEADLINE_EXCEEDED) {
+              console.error(`[ConnectomeClient] EmitEvent timed out for topic ${topic}`);
+            }
             reject(error);
           } else {
             resolve({
@@ -305,8 +337,11 @@ export class ConnectomeClient extends EventEmitter {
       agentType?: string;
       capabilities?: string[];
       metadata?: Record<string, string>;
+      timeoutMs?: number;
     }
   ): Promise<{ agentId: string; sessionToken: string; success: boolean; error?: string }> {
+    const deadline = this.createDeadline(options?.timeoutMs || 10000);
+
     return new Promise((resolve, reject) => {
       this.client.RegisterAgent(
         {
@@ -316,8 +351,12 @@ export class ConnectomeClient extends EventEmitter {
           capabilities: options?.capabilities || [],
           metadata: options?.metadata || {}
         },
+        { deadline },
         (error: any, response: any) => {
           if (error) {
+            if (error.code === grpc.status.DEADLINE_EXCEEDED) {
+              console.error(`[ConnectomeClient] RegisterAgent timed out for ${agentName}`);
+            }
             reject(error);
           } else {
             resolve({
@@ -342,8 +381,11 @@ export class ConnectomeClient extends EventEmitter {
       maxFrames?: number;
       maxTokens?: number;
       facetTypes?: string[];
+      timeoutMs?: number;
     }
   ): Promise<{ context: any; tokenCount: number; frameCount: number }> {
+    const deadline = this.createDeadline(options?.timeoutMs);
+
     return new Promise((resolve, reject) => {
       this.client.GetContext(
         {
@@ -353,8 +395,12 @@ export class ConnectomeClient extends EventEmitter {
           maxTokens: options?.maxTokens || 100000,
           facetTypes: options?.facetTypes || []
         },
+        { deadline },
         (error: any, response: any) => {
           if (error) {
+            if (error.code === grpc.status.DEADLINE_EXCEEDED) {
+              console.error(`[ConnectomeClient] GetContext timed out for stream ${streamId}`);
+            }
             reject(error);
           } else {
             let context = {};
@@ -384,8 +430,11 @@ export class ConnectomeClient extends EventEmitter {
   async createStream(
     streamId: string,
     streamType: string,
-    metadata?: Record<string, string>
+    metadata?: Record<string, string>,
+    timeoutMs?: number
   ): Promise<{ streamId: string; streamType: string; success: boolean; error?: string }> {
+    const deadline = this.createDeadline(timeoutMs || 10000);
+
     return new Promise((resolve, reject) => {
       this.client.CreateStream(
         {
@@ -393,8 +442,12 @@ export class ConnectomeClient extends EventEmitter {
           streamType,
           metadata: metadata || {}
         },
+        { deadline },
         (error: any, response: any) => {
           if (error) {
+            if (error.code === grpc.status.DEADLINE_EXCEEDED) {
+              console.error(`[ConnectomeClient] CreateStream timed out for ${streamId}`);
+            }
             reject(error);
           } else {
             resolve({
@@ -416,7 +469,10 @@ export class ConnectomeClient extends EventEmitter {
     sequence?: number;
     facetTypes?: string[];
     streamIds?: string[];
+    timeoutMs?: number;
   }): Promise<{ sequence: number; facets: any[]; streams: any[]; agents: any[] }> {
+    const deadline = this.createDeadline(options?.timeoutMs || 60000); // Longer timeout for snapshots
+
     return new Promise((resolve, reject) => {
       this.client.GetStateSnapshot(
         {
@@ -424,8 +480,12 @@ export class ConnectomeClient extends EventEmitter {
           facetTypes: options?.facetTypes || [],
           streamIds: options?.streamIds || []
         },
+        { deadline },
         (error: any, response: any) => {
           if (error) {
+            if (error.code === grpc.status.DEADLINE_EXCEEDED) {
+              console.error('[ConnectomeClient] GetStateSnapshot timed out');
+            }
             reject(error);
           } else {
             resolve({
@@ -450,8 +510,11 @@ export class ConnectomeClient extends EventEmitter {
       reason?: string;
       priority?: 'low' | 'normal' | 'high' | 'critical';
       metadata?: Record<string, string>;
+      timeoutMs?: number;
     }
   ): Promise<{ success: boolean; activationId: string; error?: string }> {
+    const deadline = this.createDeadline(options?.timeoutMs || 10000);
+
     return new Promise((resolve, reject) => {
       const priorityMap: Record<string, string> = {
         'low': 'ACTIVATION_LOW',
@@ -468,8 +531,12 @@ export class ConnectomeClient extends EventEmitter {
           priority: priorityMap[options?.priority || 'normal'],
           metadata: options?.metadata || {}
         },
+        { deadline },
         (error: any, response: any) => {
           if (error) {
+            if (error.code === grpc.status.DEADLINE_EXCEEDED) {
+              console.error(`[ConnectomeClient] ActivateAgent timed out for ${agentId} on ${streamId}`);
+            }
             reject(error);
           } else {
             resolve({
@@ -527,5 +594,14 @@ export class ConnectomeClient extends EventEmitter {
 
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Create a deadline for RPC calls
+   */
+  private createDeadline(timeoutMs?: number): Date {
+    const deadline = new Date();
+    deadline.setMilliseconds(deadline.getMilliseconds() + (timeoutMs || this.config.defaultDeadlineMs));
+    return deadline;
   }
 }
