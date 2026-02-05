@@ -53,3 +53,16 @@ export {
   estimateCompressedSize,
   type AttachmentMetadata
 } from './serialization/attachment-handler';
+
+// MCP (Model Context Protocol) integration
+export {
+  MCPManager,
+  type MCPServerConfig,
+  type MCPServerConfigStdio,
+  type MCPServerConfigSSE,
+  type MCPTool,
+  type MCPToolResult,
+  type MCPServerState,
+  type MCPManagerConfig,
+  type ToolHandler
+} from './mcp/index.js';
