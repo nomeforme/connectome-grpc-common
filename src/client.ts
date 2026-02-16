@@ -137,6 +137,9 @@ export class ConnectomeClient extends EventEmitter {
       'grpc.keepalive_permit_without_calls': 1,
       'grpc.http2.min_time_between_pings_ms': Math.floor(this.config.keepaliveTimeMs / 2),
       'grpc.http2.max_pings_without_data': 0,
+      // Allow large context responses (default 4MB is too small)
+      'grpc.max_send_message_length': 64 * 1024 * 1024,   // 64MB
+      'grpc.max_receive_message_length': 64 * 1024 * 1024, // 64MB
     };
 
     this.client = new ConnectomeService(

@@ -147,6 +147,9 @@ export class ConnectomeServer extends EventEmitter {
 
     this.server = new grpc.Server({
       'grpc.max_concurrent_streams': this.config.maxConcurrentStreams,
+      // Allow large context responses (default 4MB is too small)
+      'grpc.max_send_message_length': 64 * 1024 * 1024,   // 64MB
+      'grpc.max_receive_message_length': 64 * 1024 * 1024, // 64MB
       // Allow client keepalive pings
       'grpc.keepalive_permit_without_calls': 1,
       'grpc.http2.min_ping_interval_without_data_ms': 10000,
