@@ -3,3 +3,9 @@ dist/
 *.log
 .env
 .DS_Store
+.gitnexus
+
+# Build artifacts
+*.tsbuildinfo
+.turbo/
+.claude/

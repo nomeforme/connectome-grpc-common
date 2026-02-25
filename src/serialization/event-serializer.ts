@@ -101,7 +101,7 @@ export function protoToComponentRef(proto: ProtoComponentRef): ConnectomeCompone
  */
 export function eventToProto(event: ConnectomeSpaceEvent): ProtoSpaceEvent {
   // Serialize payload to JSON bytes
-  let payloadJson = new Uint8Array(0);
+  let payloadJson: Uint8Array = new Uint8Array(0);
   if (event.payload !== undefined) {
     const jsonStr = JSON.stringify(event.payload);
     payloadJson = new TextEncoder().encode(jsonStr);

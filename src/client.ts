@@ -115,7 +115,7 @@ export class ConnectomeClient extends EventEmitter {
    * Connect to the Connectome server
    */
   async connect(): Promise<void> {
-    const protoPath = join(__dirname, '..', 'proto', 'connectome.proto');
+    const protoPath = join(import.meta.dirname, '..', 'proto', 'connectome.proto');
 
     const packageDefinition = await protoLoader.load(protoPath, {
       keepCase: false,

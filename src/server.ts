@@ -132,7 +132,7 @@ export class ConnectomeServer extends EventEmitter {
       throw new Error('Service handlers must be set before starting server');
     }
 
-    const protoPath = join(__dirname, '..', 'proto', 'connectome.proto');
+    const protoPath = join(import.meta.dirname, '..', 'proto', 'connectome.proto');
 
     const packageDefinition = await protoLoader.load(protoPath, {
       keepCase: false,
