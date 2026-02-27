@@ -60,6 +60,7 @@ export {
   type MCPServerConfig,
   type MCPServerConfigStdio,
   type MCPServerConfigSSE,
+  type MCPServerConfigStreamableHTTP,
   type MCPTool,
   type MCPToolResult,
   type MCPServerState,

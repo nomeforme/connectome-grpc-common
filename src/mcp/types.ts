@@ -36,9 +36,23 @@ export interface MCPServerConfigSSE {
 }
 
 /**
+ * MCP server configuration for Streamable HTTP transport
+ */
+export interface MCPServerConfigStreamableHTTP {
+  /** Unique name for this MCP server */
+  name: string;
+  /** Transport type */
+  transport: 'streamable-http';
+  /** URL of the HTTP endpoint */
+  url: string;
+  /** Optional headers for the connection (e.g. Authorization) */
+  headers?: Record<string, string>;
+}
+
+/**
  * Union type for all MCP server configurations
  */
-export type MCPServerConfig = MCPServerConfigStdio | MCPServerConfigSSE;
+export type MCPServerConfig = MCPServerConfigStdio | MCPServerConfigSSE | MCPServerConfigStreamableHTTP;
 
 /**
  * MCP tool definition (from server)

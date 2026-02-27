@@ -6,11 +6,13 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { EventEmitter } from 'events';
 import type {
   MCPServerConfig,
   MCPServerConfigStdio,
   MCPServerConfigSSE,
+  MCPServerConfigStreamableHTTP,
   MCPTool,
   MCPToolResult,
   MCPServerState,
@@ -24,7 +26,7 @@ import type {
 interface ConnectedServer {
   config: MCPServerConfig;
   client: Client;
-  transport: StdioClientTransport | SSEClientTransport;
+  transport: StdioClientTransport | SSEClientTransport | StreamableHTTPClientTransport;
   tools: MCPTool[];
 }
 
@@ -97,10 +99,12 @@ export class MCPManager extends EventEmitter {
         version: '1.0.0'
       });
 
-      let transport: StdioClientTransport | SSEClientTransport;
+      let transport: StdioClientTransport | SSEClientTransport | StreamableHTTPClientTransport;
 
       if (serverConfig.transport === 'stdio') {
         transport = this.createStdioTransport(serverConfig);
+      } else if (serverConfig.transport === 'streamable-http') {
+        transport = this.createStreamableHTTPTransport(serverConfig);
       } else {
         transport = this.createSSETransport(serverConfig);
       }
@@ -161,11 +165,39 @@ export class MCPManager extends EventEmitter {
   }
 
   /**
+   * Resolve ${VAR} patterns in header values from process.env
+   */
+  private resolveHeaders(headers?: Record<string, string>): Record<string, string> | undefined {
+    if (!headers) return undefined;
+    const resolved: Record<string, string> = {};
+    for (const [key, value] of Object.entries(headers)) {
+      resolved[key] = value.replace(/\$\{(\w+)\}/g, (_, name) => process.env[name] || '');
+    }
+    return resolved;
+  }
+
+  /**
    * Create SSE transport
    */
   private createSSETransport(config: MCPServerConfigSSE): SSEClientTransport {
     const url = new URL(config.url);
-    return new SSEClientTransport(url);
+    const headers = this.resolveHeaders(config.headers);
+    if (!headers) {
+      return new SSEClientTransport(url);
+    }
+    return new SSEClientTransport(url, {
+      eventSourceInit: { fetch: (url, init) => fetch(url, { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers).entries()), ...headers } }) },
+      requestInit: { headers }
+    });
+  }
+
+  /**
+   * Create Streamable HTTP transport
+   */
+  private createStreamableHTTPTransport(config: MCPServerConfigStreamableHTTP): StreamableHTTPClientTransport {
+    const url = new URL(config.url);
+    const headers = this.resolveHeaders(config.headers);
+    return new StreamableHTTPClientTransport(url, headers ? { requestInit: { headers } } : undefined);
   }
 
   /**
