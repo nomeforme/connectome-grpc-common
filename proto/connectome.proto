@@ -236,6 +236,7 @@ message CreateStreamRequest {
   string stream_id = 1;
   string stream_type = 2;
   map<string, string> metadata = 3;
+  string parent_stream_id = 4;    // Fork from parent stream (inherits context up to fork point)
 }
 
 message StreamRef {
@@ -269,6 +270,7 @@ message StreamInfo {
   string id = 1;
   string name = 2;
   map<string, string> metadata = 3;
+  string parent_id = 4;           // Parent stream ID (for branched streams)
 }
 
 message AgentInfo {

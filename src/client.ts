@@ -434,6 +434,7 @@ export class ConnectomeClient extends EventEmitter {
     streamId: string,
     streamType: string,
     metadata?: Record<string, string>,
+    parentStreamId?: string,
     timeoutMs?: number
   ): Promise<{ streamId: string; streamType: string; success: boolean; error?: string }> {
     const deadline = this.createDeadline(timeoutMs || 10000);
@@ -443,7 +444,8 @@ export class ConnectomeClient extends EventEmitter {
         {
           streamId,
           streamType,
-          metadata: metadata || {}
+          metadata: metadata || {},
+          parentStreamId: parentStreamId || '',
         },
         { deadline },
         (error: any, response: any) => {
