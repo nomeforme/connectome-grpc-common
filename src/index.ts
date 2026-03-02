@@ -54,6 +54,9 @@ export {
   type AttachmentMetadata
 } from './serialization/attachment-handler';
 
+// Error tracking (Sentry/GlitchTip)
+export { initErrorTracking, Sentry } from './sentry.js';
+
 // MCP (Model Context Protocol) integration
 export {
   MCPManager,

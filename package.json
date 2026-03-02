@@ -19,6 +19,7 @@
     "proto:js": "grpc_tools_node_protoc --js_out=import_style=commonjs,binary:./src/generated --grpc_out=grpc_js:./src/generated --proto_path=./proto ./proto/*.proto"
   },
   "dependencies": {
+    "@sentry/node": "^9.0.0",
     "@grpc/grpc-js": "^1.10.0",
     "@grpc/proto-loader": "^0.7.10",
     "@modelcontextprotocol/sdk": "^1.0.0",
