@@ -297,26 +297,44 @@ export class ConnectomeServer extends EventEmitter {
       }
     };
 
+    // Dedup: cancel old subscription before creating new one
+    const existingSubscription = this.activeSubscriptions.get(clientId);
+    if (existingSubscription) {
+      console.log(`[ConnectomeServer] Cancelling existing subscription for ${clientId}`);
+      existingSubscription.cancel();
+    }
+
+    // Register subscription with handlers
+    // Note: onEnd references unsubscribe via closure, so declare it first as mutable
+    let cancelFn: (() => void) | null = null;
+
     const onEnd = () => {
       if (call.writable) {
         call.end();
       }
-      this.activeSubscriptions.delete(clientId);
+      // Guard: only delete if we're still the active subscription
+      const current = this.activeSubscriptions.get(clientId);
+      if (current && current.cancel === cancelFn) {
+        this.activeSubscriptions.delete(clientId);
+      }
     };
 
-    // Register subscription with handlers
     const unsubscribe = this.handlers!.subscribeToFacets(request, sendDelta, onEnd);
-
+    cancelFn = unsubscribe;
     this.activeSubscriptions.set(clientId, { cancel: unsubscribe });
 
-    // Handle client disconnect
+    // Handle client disconnect (guarded against stale events from replaced subscriptions)
     call.on('cancelled', () => {
+      const current = this.activeSubscriptions.get(clientId);
+      if (current?.cancel !== unsubscribe) return; // Already replaced
       console.log(`[ConnectomeServer] Subscription cancelled for ${clientId}`);
       unsubscribe();
       this.activeSubscriptions.delete(clientId);
     });
 
     call.on('error', (error: any) => {
+      const current = this.activeSubscriptions.get(clientId);
+      if (current?.cancel !== unsubscribe) return; // Already replaced
       if (error.code !== grpc.status.CANCELLED) {
         console.error(`[ConnectomeServer] Subscription error for ${clientId}:`, error.message);
       }

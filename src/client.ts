@@ -93,7 +93,8 @@ export class ConnectomeClient extends EventEmitter {
   private connected: boolean = false;
   private reconnecting: boolean = false;
   private reconnectAttempts: number = 0;
-  private subscriptionStream: any = null;
+  private subscriptionStreams: Map<string, any> = new Map();
+  private subscriptionCounter: number = 0;
   private protoDescriptor: any;
 
   constructor(config: ConnectomeClientConfig) {
@@ -171,10 +172,10 @@ export class ConnectomeClient extends EventEmitter {
    * Disconnect from the server
    */
   disconnect(): void {
-    if (this.subscriptionStream) {
-      this.subscriptionStream.cancel();
-      this.subscriptionStream = null;
+    for (const [subId, stream] of this.subscriptionStreams) {
+      stream.cancel();
     }
+    this.subscriptionStreams.clear();
 
     if (this.client) {
       this.client.close();
@@ -283,8 +284,10 @@ export class ConnectomeClient extends EventEmitter {
     options: SubscriptionOptions,
     callback: (delta: FacetDelta) => void
   ): () => void {
+    const subId = `${this.config.clientId}-sub${++this.subscriptionCounter}`;
+
     const request = {
-      clientId: this.config.clientId,
+      clientId: subId,
       filters: (options.filters || []).map(f => ({
         types: f.types || [],
         aspectMatch: f.aspectMatch || {},
@@ -296,7 +299,7 @@ export class ConnectomeClient extends EventEmitter {
     };
 
     const stream = this.client.SubscribeToFacets(request);
-    this.subscriptionStream = stream;
+    this.subscriptionStreams.set(subId, stream);
 
     stream.on('data', (data: any) => {
       const delta: FacetDelta = {
@@ -312,21 +315,21 @@ export class ConnectomeClient extends EventEmitter {
 
     stream.on('error', (error: any) => {
       if (error.code !== grpc.status.CANCELLED) {
-        console.error('[ConnectomeClient] Subscription error:', error.message);
+        console.error(`[ConnectomeClient] Subscription ${subId} error:`, error.message);
         this.emit('error', error);
         this.handleDisconnect();
       }
     });
 
     stream.on('end', () => {
-      console.log('[ConnectomeClient] Subscription stream ended');
-      this.subscriptionStream = null;
+      console.log(`[ConnectomeClient] Subscription ${subId} stream ended`);
+      this.subscriptionStreams.delete(subId);
     });
 
     // Return unsubscribe function
     return () => {
       stream.cancel();
-      this.subscriptionStream = null;
+      this.subscriptionStreams.delete(subId);
     };
   }
 
