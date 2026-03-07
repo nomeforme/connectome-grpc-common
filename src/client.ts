@@ -387,6 +387,7 @@ export class ConnectomeClient extends EventEmitter {
       maxFrames?: number;
       maxTokens?: number;
       facetTypes?: string[];
+      includeUnfocused?: boolean;
       timeoutMs?: number;
     }
   ): Promise<{ context: any; tokenCount: number; frameCount: number }> {
@@ -399,7 +400,8 @@ export class ConnectomeClient extends EventEmitter {
           streamId,
           maxFrames: options?.maxFrames || 100,
           maxTokens: options?.maxTokens || 100000,
-          facetTypes: options?.facetTypes || []
+          facetTypes: options?.facetTypes || [],
+          includeUnfocused: options?.includeUnfocused || false
         },
         { deadline },
         (error: any, response: any) => {

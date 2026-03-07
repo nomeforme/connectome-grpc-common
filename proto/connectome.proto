@@ -217,6 +217,7 @@ message GetContextRequest {
   int32 max_frames = 3;
   int32 max_tokens = 4;
   repeated string facet_types = 5;  // Filter by types
+  bool include_unfocused = 6;       // Include cross-stream frames as demoted context (default: false)
 }
 
 message RenderedContext {
