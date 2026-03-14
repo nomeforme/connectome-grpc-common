@@ -292,6 +292,8 @@ export class ConnectomeClient extends EventEmitter {
     let cancelled = false;
     let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
     let reconnectAttempt = 0;
+    /** Track active stream so stale end/error handlers from replaced streams are ignored */
+    let activeStream: any = null;
 
     const createStream = () => {
       if (cancelled || !this.client) return;
@@ -310,6 +312,7 @@ export class ConnectomeClient extends EventEmitter {
       };
 
       const stream = this.client.SubscribeToFacets(request);
+      activeStream = stream;
       this.subscriptionStreams.set(subId, stream);
 
       stream.on('data', (data: any) => {
@@ -330,6 +333,7 @@ export class ConnectomeClient extends EventEmitter {
 
       stream.on('error', (error: any) => {
         if (error.code === grpc.status.CANCELLED || cancelled) return;
+        if (stream !== activeStream) return; // Stale stream — already replaced
         console.error(`[ConnectomeClient] Subscription ${subId} error: ${error.message}, reconnecting...`);
         this.subscriptionStreams.delete(subId);
         scheduleReconnect();
@@ -337,6 +341,7 @@ export class ConnectomeClient extends EventEmitter {
 
       stream.on('end', () => {
         if (cancelled) return;
+        if (stream !== activeStream) return; // Stale stream — already replaced
         console.log(`[ConnectomeClient] Subscription ${subId} ended, reconnecting...`);
         this.subscriptionStreams.delete(subId);
         scheduleReconnect();
@@ -345,6 +350,8 @@ export class ConnectomeClient extends EventEmitter {
 
     const scheduleReconnect = () => {
       if (cancelled) return;
+      // Clear any pending reconnect to prevent stacking
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
       reconnectAttempt++;
       const delay = Math.min(1000 * Math.pow(2, Math.min(reconnectAttempt, 5)) + Math.random() * 500, 30000);
       console.log(`[ConnectomeClient] Subscription ${subId} reconnect attempt ${reconnectAttempt} in ${Math.round(delay)}ms`);
