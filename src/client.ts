@@ -197,27 +197,28 @@ export class ConnectomeClient extends EventEmitter {
    * Health check
    */
   async health(timeoutMs?: number): Promise<HealthStatus> {
-    const deadline = this.createDeadline(timeoutMs || 5000); // Short timeout for health
-
-    return new Promise((resolve, reject) => {
-      this.client.Health(
-        { clientId: this.config.clientId },
-        { deadline },
-        (error: any, response: any) => {
-          if (error) {
-            reject(error);
-          } else {
-            resolve({
-              healthy: response.healthy,
-              currentSequence: response.currentSequence,
-              activeStreams: response.activeStreams,
-              activeAgents: response.activeAgents,
-              uptimeMs: response.uptimeMs
-            });
+    return this.retryUnary(() => {
+      const deadline = this.createDeadline(timeoutMs || 5000);
+      return new Promise<HealthStatus>((resolve, reject) => {
+        this.client.Health(
+          { clientId: this.config.clientId },
+          { deadline },
+          (error: any, response: any) => {
+            if (error) {
+              reject(error);
+            } else {
+              resolve({
+                healthy: response.healthy,
+                currentSequence: response.currentSequence,
+                activeStreams: response.activeStreams,
+                activeAgents: response.activeAgents,
+                uptimeMs: response.uptimeMs
+              });
+            }
           }
-        }
-      );
-    });
+        );
+      });
+    }, { maxRetries: 1 });
   }
 
   /**
@@ -234,101 +235,130 @@ export class ConnectomeClient extends EventEmitter {
       timeoutMs?: number;
     }
   ): Promise<FrameResult> {
-    const protoEvent = createProtoEvent(
-      topic,
-      this.config.clientId,
-      payload,
-      options
-    );
-
-    const deadline = this.createDeadline(options?.timeoutMs);
-
-    return new Promise((resolve, reject) => {
-      this.client.EmitEvent(
-        {
-          event: protoEvent,
-          waitForFrame: options?.waitForFrame ?? true
-        },
-        { deadline },
-        (error: any, response: any) => {
-          if (error) {
-            if (error.code === grpc.status.DEADLINE_EXCEEDED) {
-              console.error(`[ConnectomeClient] EmitEvent timed out for topic ${topic}`);
-            }
-            reject(error);
-          } else {
-            resolve({
-              success: response.success,
-              sequence: response.sequence,
-              frameUuid: response.frameUuid,
-              deltas: (response.deltas || []).map((d: any) => ({
-                type: d.type === 'DELTA_ADDED' ? 'added' :
-                      d.type === 'DELTA_CHANGED' ? 'changed' : 'removed',
-                facet: d.facet ? protoToFacet(d.facet) : null,
-                oldFacet: d.oldFacet ? protoToFacet(d.oldFacet) : null,
-                sequence: d.sequence,
-                frameUuid: d.frameUuid
-              })),
-              error: response.error
-            });
-          }
-        }
+    return this.retryUnary(() => {
+      const protoEvent = createProtoEvent(
+        topic,
+        this.config.clientId,
+        payload,
+        options
       );
+
+      const deadline = this.createDeadline(options?.timeoutMs || 60000);
+
+      return new Promise<FrameResult>((resolve, reject) => {
+        this.client.EmitEvent(
+          {
+            event: protoEvent,
+            waitForFrame: options?.waitForFrame ?? true
+          },
+          { deadline },
+          (error: any, response: any) => {
+            if (error) {
+              if (error.code === grpc.status.DEADLINE_EXCEEDED) {
+                console.error(`[ConnectomeClient] EmitEvent timed out for topic ${topic}`);
+              }
+              reject(error);
+            } else {
+              resolve({
+                success: response.success,
+                sequence: response.sequence,
+                frameUuid: response.frameUuid,
+                deltas: (response.deltas || []).map((d: any) => ({
+                  type: d.type === 'DELTA_ADDED' ? 'added' :
+                        d.type === 'DELTA_CHANGED' ? 'changed' : 'removed',
+                  facet: d.facet ? protoToFacet(d.facet) : null,
+                  oldFacet: d.oldFacet ? protoToFacet(d.oldFacet) : null,
+                  sequence: d.sequence,
+                  frameUuid: d.frameUuid
+                })),
+                error: response.error
+              });
+            }
+          }
+        );
+      });
     });
   }
 
   /**
-   * Subscribe to facet changes
+   * Subscribe to facet changes with auto-reconnect and sequence tracking
    */
   subscribe(
     options: SubscriptionOptions,
     callback: (delta: FacetDelta) => void
   ): () => void {
     const subId = `${this.config.clientId}-sub${++this.subscriptionCounter}`;
+    let lastSequence = options.fromSequence || 0;
+    let cancelled = false;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempt = 0;
 
-    const request = {
-      clientId: subId,
-      filters: (options.filters || []).map(f => ({
-        types: f.types || [],
-        aspectMatch: f.aspectMatch || {},
-        attributeMatch: f.attributeMatch || {}
-      })),
-      includeExisting: options.includeExisting || false,
-      fromSequence: options.fromSequence || 0,
-      streamIds: options.streamIds || []
+    const createStream = () => {
+      if (cancelled || !this.client) return;
+
+      const request = {
+        clientId: subId,
+        filters: (options.filters || []).map(f => ({
+          types: f.types || [],
+          aspectMatch: f.aspectMatch || {},
+          attributeMatch: f.attributeMatch || {}
+        })),
+        // Only include existing on first connect (not reconnect)
+        includeExisting: (options.includeExisting || false) && lastSequence === 0,
+        fromSequence: lastSequence,
+        streamIds: options.streamIds || []
+      };
+
+      const stream = this.client.SubscribeToFacets(request);
+      this.subscriptionStreams.set(subId, stream);
+
+      stream.on('data', (data: any) => {
+        reconnectAttempt = 0; // Reset on successful data
+        const delta: FacetDelta = {
+          type: data.type === 'DELTA_ADDED' ? 'added' :
+                data.type === 'DELTA_CHANGED' ? 'changed' : 'removed',
+          facet: data.facet ? protoToFacet(data.facet) : null,
+          oldFacet: data.oldFacet ? protoToFacet(data.oldFacet) : null,
+          sequence: data.sequence,
+          frameUuid: data.frameUuid
+        };
+        if (delta.sequence > lastSequence) {
+          lastSequence = delta.sequence;
+        }
+        callback(delta);
+      });
+
+      stream.on('error', (error: any) => {
+        if (error.code === grpc.status.CANCELLED || cancelled) return;
+        console.error(`[ConnectomeClient] Subscription ${subId} error: ${error.message}, reconnecting...`);
+        this.subscriptionStreams.delete(subId);
+        scheduleReconnect();
+      });
+
+      stream.on('end', () => {
+        if (cancelled) return;
+        console.log(`[ConnectomeClient] Subscription ${subId} ended, reconnecting...`);
+        this.subscriptionStreams.delete(subId);
+        scheduleReconnect();
+      });
     };
 
-    const stream = this.client.SubscribeToFacets(request);
-    this.subscriptionStreams.set(subId, stream);
+    const scheduleReconnect = () => {
+      if (cancelled) return;
+      reconnectAttempt++;
+      const delay = Math.min(1000 * Math.pow(2, Math.min(reconnectAttempt, 5)) + Math.random() * 500, 30000);
+      console.log(`[ConnectomeClient] Subscription ${subId} reconnect attempt ${reconnectAttempt} in ${Math.round(delay)}ms`);
+      reconnectTimeout = setTimeout(() => createStream(), delay);
+    };
 
-    stream.on('data', (data: any) => {
-      const delta: FacetDelta = {
-        type: data.type === 'DELTA_ADDED' ? 'added' :
-              data.type === 'DELTA_CHANGED' ? 'changed' : 'removed',
-        facet: data.facet ? protoToFacet(data.facet) : null,
-        oldFacet: data.oldFacet ? protoToFacet(data.oldFacet) : null,
-        sequence: data.sequence,
-        frameUuid: data.frameUuid
-      };
-      callback(delta);
-    });
-
-    stream.on('error', (error: any) => {
-      if (error.code !== grpc.status.CANCELLED) {
-        console.error(`[ConnectomeClient] Subscription ${subId} error:`, error.message);
-        this.emit('error', error);
-        this.handleDisconnect();
-      }
-    });
-
-    stream.on('end', () => {
-      console.log(`[ConnectomeClient] Subscription ${subId} stream ended`);
-      this.subscriptionStreams.delete(subId);
-    });
+    createStream();
 
     // Return unsubscribe function
     return () => {
-      stream.cancel();
+      cancelled = true;
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      const stream = this.subscriptionStreams.get(subId);
+      if (stream) stream.cancel();
       this.subscriptionStreams.delete(subId);
     };
   }
@@ -346,34 +376,35 @@ export class ConnectomeClient extends EventEmitter {
       timeoutMs?: number;
     }
   ): Promise<{ agentId: string; sessionToken: string; success: boolean; error?: string }> {
-    const deadline = this.createDeadline(options?.timeoutMs || 10000);
-
-    return new Promise((resolve, reject) => {
-      this.client.RegisterAgent(
-        {
-          agentId,
-          agentName,
-          agentType: options?.agentType || 'assistant',
-          capabilities: options?.capabilities || [],
-          metadata: options?.metadata || {}
-        },
-        { deadline },
-        (error: any, response: any) => {
-          if (error) {
-            if (error.code === grpc.status.DEADLINE_EXCEEDED) {
-              console.error(`[ConnectomeClient] RegisterAgent timed out for ${agentName}`);
+    return this.retryUnary(() => {
+      const deadline = this.createDeadline(options?.timeoutMs || 10000);
+      return new Promise<{ agentId: string; sessionToken: string; success: boolean; error?: string }>((resolve, reject) => {
+        this.client.RegisterAgent(
+          {
+            agentId,
+            agentName,
+            agentType: options?.agentType || 'assistant',
+            capabilities: options?.capabilities || [],
+            metadata: options?.metadata || {}
+          },
+          { deadline },
+          (error: any, response: any) => {
+            if (error) {
+              if (error.code === grpc.status.DEADLINE_EXCEEDED) {
+                console.error(`[ConnectomeClient] RegisterAgent timed out for ${agentName}`);
+              }
+              reject(error);
+            } else {
+              resolve({
+                agentId: response.agentId,
+                sessionToken: response.sessionToken,
+                success: response.success,
+                error: response.error
+              });
             }
-            reject(error);
-          } else {
-            resolve({
-              agentId: response.agentId,
-              sessionToken: response.sessionToken,
-              success: response.success,
-              error: response.error
-            });
           }
-        }
-      );
+        );
+      });
     });
   }
 
@@ -391,44 +422,45 @@ export class ConnectomeClient extends EventEmitter {
       timeoutMs?: number;
     }
   ): Promise<{ context: any; tokenCount: number; frameCount: number }> {
-    const deadline = this.createDeadline(options?.timeoutMs);
-
-    return new Promise((resolve, reject) => {
-      this.client.GetContext(
-        {
-          agentId,
-          streamId,
-          maxFrames: options?.maxFrames || 100,
-          maxTokens: options?.maxTokens || 100000,
-          facetTypes: options?.facetTypes || [],
-          includeUnfocused: options?.includeUnfocused || false
-        },
-        { deadline },
-        (error: any, response: any) => {
-          if (error) {
-            if (error.code === grpc.status.DEADLINE_EXCEEDED) {
-              console.error(`[ConnectomeClient] GetContext timed out for stream ${streamId}`);
-            }
-            reject(error);
-          } else {
-            let context = {};
-            if (response.contextJson && response.contextJson.length > 0) {
-              const jsonStr = new TextDecoder().decode(response.contextJson);
-              try {
-                context = JSON.parse(jsonStr);
-              } catch {
-                console.warn('[ConnectomeClient] Failed to parse context JSON');
+    return this.retryUnary(() => {
+      const deadline = this.createDeadline(options?.timeoutMs || 60000);
+      return new Promise<{ context: any; tokenCount: number; frameCount: number }>((resolve, reject) => {
+        this.client.GetContext(
+          {
+            agentId,
+            streamId,
+            maxFrames: options?.maxFrames || 100,
+            maxTokens: options?.maxTokens || 100000,
+            facetTypes: options?.facetTypes || [],
+            includeUnfocused: options?.includeUnfocused || false
+          },
+          { deadline },
+          (error: any, response: any) => {
+            if (error) {
+              if (error.code === grpc.status.DEADLINE_EXCEEDED) {
+                console.error(`[ConnectomeClient] GetContext timed out for stream ${streamId}`);
               }
-            }
+              reject(error);
+            } else {
+              let context = {};
+              if (response.contextJson && response.contextJson.length > 0) {
+                const jsonStr = new TextDecoder().decode(response.contextJson);
+                try {
+                  context = JSON.parse(jsonStr);
+                } catch {
+                  console.warn('[ConnectomeClient] Failed to parse context JSON');
+                }
+              }
 
-            resolve({
-              context,
-              tokenCount: response.tokenCount,
-              frameCount: response.frameCount
-            });
+              resolve({
+                context,
+                tokenCount: response.tokenCount,
+                frameCount: response.frameCount
+              });
+            }
           }
-        }
-      );
+        );
+      });
     });
   }
 
@@ -442,33 +474,34 @@ export class ConnectomeClient extends EventEmitter {
     parentStreamId?: string,
     timeoutMs?: number
   ): Promise<{ streamId: string; streamType: string; success: boolean; error?: string }> {
-    const deadline = this.createDeadline(timeoutMs || 10000);
-
-    return new Promise((resolve, reject) => {
-      this.client.CreateStream(
-        {
-          streamId,
-          streamType,
-          metadata: metadata || {},
-          parentStreamId: parentStreamId || '',
-        },
-        { deadline },
-        (error: any, response: any) => {
-          if (error) {
-            if (error.code === grpc.status.DEADLINE_EXCEEDED) {
-              console.error(`[ConnectomeClient] CreateStream timed out for ${streamId}`);
+    return this.retryUnary(() => {
+      const deadline = this.createDeadline(timeoutMs || 15000);
+      return new Promise<{ streamId: string; streamType: string; success: boolean; error?: string }>((resolve, reject) => {
+        this.client.CreateStream(
+          {
+            streamId,
+            streamType,
+            metadata: metadata || {},
+            parentStreamId: parentStreamId || '',
+          },
+          { deadline },
+          (error: any, response: any) => {
+            if (error) {
+              if (error.code === grpc.status.DEADLINE_EXCEEDED) {
+                console.error(`[ConnectomeClient] CreateStream timed out for ${streamId}`);
+              }
+              reject(error);
+            } else {
+              resolve({
+                streamId: response.streamId,
+                streamType: response.streamType,
+                success: response.success,
+                error: response.error
+              });
             }
-            reject(error);
-          } else {
-            resolve({
-              streamId: response.streamId,
-              streamType: response.streamType,
-              success: response.success,
-              error: response.error
-            });
           }
-        }
-      );
+        );
+      });
     });
   }
 
@@ -481,32 +514,33 @@ export class ConnectomeClient extends EventEmitter {
     streamIds?: string[];
     timeoutMs?: number;
   }): Promise<{ sequence: number; facets: any[]; streams: any[]; agents: any[] }> {
-    const deadline = this.createDeadline(options?.timeoutMs || 60000); // Longer timeout for snapshots
-
-    return new Promise((resolve, reject) => {
-      this.client.GetStateSnapshot(
-        {
-          sequence: options?.sequence || 0,
-          facetTypes: options?.facetTypes || [],
-          streamIds: options?.streamIds || []
-        },
-        { deadline },
-        (error: any, response: any) => {
-          if (error) {
-            if (error.code === grpc.status.DEADLINE_EXCEEDED) {
-              console.error('[ConnectomeClient] GetStateSnapshot timed out');
+    return this.retryUnary(() => {
+      const deadline = this.createDeadline(options?.timeoutMs || 60000);
+      return new Promise<{ sequence: number; facets: any[]; streams: any[]; agents: any[] }>((resolve, reject) => {
+        this.client.GetStateSnapshot(
+          {
+            sequence: options?.sequence || 0,
+            facetTypes: options?.facetTypes || [],
+            streamIds: options?.streamIds || []
+          },
+          { deadline },
+          (error: any, response: any) => {
+            if (error) {
+              if (error.code === grpc.status.DEADLINE_EXCEEDED) {
+                console.error('[ConnectomeClient] GetStateSnapshot timed out');
+              }
+              reject(error);
+            } else {
+              resolve({
+                sequence: response.sequence,
+                facets: (response.facets || []).map((f: any) => protoToFacet(f)),
+                streams: response.streams || [],
+                agents: response.agents || []
+              });
             }
-            reject(error);
-          } else {
-            resolve({
-              sequence: response.sequence,
-              facets: (response.facets || []).map((f: any) => protoToFacet(f)),
-              streams: response.streams || [],
-              agents: response.agents || []
-            });
           }
-        }
-      );
+        );
+      });
     });
   }
 
@@ -523,9 +557,9 @@ export class ConnectomeClient extends EventEmitter {
       timeoutMs?: number;
     }
   ): Promise<{ success: boolean; activationId: string; error?: string }> {
-    const deadline = this.createDeadline(options?.timeoutMs || 10000);
+    return this.retryUnary(() => {
+      const deadline = this.createDeadline(options?.timeoutMs || 45000);
 
-    return new Promise((resolve, reject) => {
       const priorityMap: Record<string, string> = {
         'low': 'ACTIVATION_LOW',
         'normal': 'ACTIVATION_NORMAL',
@@ -533,31 +567,78 @@ export class ConnectomeClient extends EventEmitter {
         'critical': 'ACTIVATION_CRITICAL'
       };
 
-      this.client.ActivateAgent(
-        {
-          agentId,
-          streamId,
-          reason: options?.reason || 'external activation',
-          priority: priorityMap[options?.priority || 'normal'],
-          metadata: options?.metadata || {}
-        },
-        { deadline },
-        (error: any, response: any) => {
-          if (error) {
-            if (error.code === grpc.status.DEADLINE_EXCEEDED) {
-              console.error(`[ConnectomeClient] ActivateAgent timed out for ${agentId} on ${streamId}`);
+      return new Promise<{ success: boolean; activationId: string; error?: string }>((resolve, reject) => {
+        this.client.ActivateAgent(
+          {
+            agentId,
+            streamId,
+            reason: options?.reason || 'external activation',
+            priority: priorityMap[options?.priority || 'normal'],
+            metadata: options?.metadata || {}
+          },
+          { deadline },
+          (error: any, response: any) => {
+            if (error) {
+              if (error.code === grpc.status.DEADLINE_EXCEEDED) {
+                console.error(`[ConnectomeClient] ActivateAgent timed out for ${agentId} on ${streamId}`);
+              }
+              reject(error);
+            } else {
+              resolve({
+                success: response.success,
+                activationId: response.activationId,
+                error: response.error
+              });
             }
-            reject(error);
-          } else {
-            resolve({
-              success: response.success,
-              activationId: response.activationId,
-              error: response.error
-            });
           }
-        }
-      );
+        );
+      });
     });
+  }
+
+  /**
+   * Retry a unary RPC with exponential backoff on transient errors
+   */
+  private async retryUnary<T>(
+    fn: () => Promise<T>,
+    options: {
+      maxRetries?: number;
+      baseDelayMs?: number;
+      maxDelayMs?: number;
+    } = {}
+  ): Promise<T> {
+    const {
+      maxRetries = 3,
+      baseDelayMs = 500,
+      maxDelayMs = 10000,
+    } = options;
+
+    const retryableStatuses = new Set([
+      grpc.status.DEADLINE_EXCEEDED,
+      grpc.status.UNAVAILABLE,
+      grpc.status.RESOURCE_EXHAUSTED,
+    ]);
+
+    let lastError: any;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (error: any) {
+        lastError = error;
+        if (attempt === maxRetries || !retryableStatuses.has(error.code)) {
+          throw error;
+        }
+        const delay = Math.min(
+          baseDelayMs * Math.pow(2, attempt) + Math.random() * 100,
+          maxDelayMs
+        );
+        console.warn(
+          `[ConnectomeClient] Retry ${attempt + 1}/${maxRetries} after ${Math.round(delay)}ms: ${error.message}`
+        );
+        await this.sleep(delay);
+      }
+    }
+    throw lastError;
   }
 
   /**

@@ -20,6 +20,56 @@ import {
 } from './serialization/event-serializer';
 
 /**
+ * Backpressure-aware buffered writer for gRPC streaming subscriptions.
+ * Prevents slow clients from blocking the event loop / other subscribers.
+ */
+class BufferedDeltaWriter {
+  private queue: any[] = [];
+  private draining = false;
+  private dropped = 0;
+  private readonly MAX_QUEUE_SIZE = 1000;
+
+  constructor(
+    private call: grpc.ServerWritableStream<any, any>,
+    private clientId: string
+  ) {}
+
+  write(protoData: any): void {
+    if (!this.call.writable) return;
+
+    if (this.queue.length >= this.MAX_QUEUE_SIZE) {
+      this.queue.shift();
+      this.dropped++;
+      if (this.dropped % 100 === 1) {
+        console.warn(
+          `[ConnectomeServer] Client ${this.clientId}: dropped ${this.dropped} deltas (slow consumer)`
+        );
+      }
+    }
+
+    this.queue.push(protoData);
+    this.flush();
+  }
+
+  private flush(): void {
+    if (this.draining) return;
+
+    while (this.queue.length > 0 && this.call.writable) {
+      const data = this.queue.shift()!;
+      const canContinue = this.call.write(data);
+      if (!canContinue) {
+        this.draining = true;
+        this.call.once('drain', () => {
+          this.draining = false;
+          this.flush();
+        });
+        return;
+      }
+    }
+  }
+}
+
+/**
  * Server configuration
  */
 export interface ConnectomeServerConfig {
@@ -113,7 +163,7 @@ export class ConnectomeServer extends EventEmitter {
     this.config = {
       port: config.port || 50051,
       host: config.host || '0.0.0.0',
-      maxConcurrentStreams: config.maxConcurrentStreams || 100
+      maxConcurrentStreams: config.maxConcurrentStreams || 500
     };
   }
 
@@ -278,9 +328,8 @@ export class ConnectomeServer extends EventEmitter {
 
     console.log(`[ConnectomeServer] New subscription from ${clientId}`);
 
+    const writer = new BufferedDeltaWriter(call, clientId);
     const sendDelta = (delta: any) => {
-      if (!call.writable) return;
-
       const protoData = {
         type: delta.type === 'added' ? 'DELTA_ADDED' :
               delta.type === 'changed' ? 'DELTA_CHANGED' : 'DELTA_REMOVED',
@@ -289,12 +338,7 @@ export class ConnectomeServer extends EventEmitter {
         sequence: delta.sequence,
         frameUuid: delta.frameUuid
       };
-
-      try {
-        call.write(protoData);
-      } catch (error: any) {
-        console.error(`[ConnectomeServer] Error writing to stream: ${error.message}`);
-      }
+      writer.write(protoData);
     };
 
     // Dedup: cancel old subscription before creating new one
