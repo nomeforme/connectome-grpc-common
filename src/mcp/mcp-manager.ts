@@ -165,13 +165,20 @@ export class MCPManager extends EventEmitter {
   }
 
   /**
+   * Resolve ${VAR} patterns in a string from process.env
+   */
+  private resolveEnvVars(value: string): string {
+    return value.replace(/\$\{(\w+)\}/g, (_, name) => process.env[name] || '');
+  }
+
+  /**
    * Resolve ${VAR} patterns in header values from process.env
    */
   private resolveHeaders(headers?: Record<string, string>): Record<string, string> | undefined {
     if (!headers) return undefined;
     const resolved: Record<string, string> = {};
     for (const [key, value] of Object.entries(headers)) {
-      resolved[key] = value.replace(/\$\{(\w+)\}/g, (_, name) => process.env[name] || '');
+      resolved[key] = this.resolveEnvVars(value);
     }
     return resolved;
   }
@@ -180,7 +187,7 @@ export class MCPManager extends EventEmitter {
    * Create SSE transport
    */
   private createSSETransport(config: MCPServerConfigSSE): SSEClientTransport {
-    const url = new URL(config.url);
+    const url = new URL(this.resolveEnvVars(config.url));
     const headers = this.resolveHeaders(config.headers);
     if (!headers) {
       return new SSEClientTransport(url);
@@ -195,7 +202,7 @@ export class MCPManager extends EventEmitter {
    * Create Streamable HTTP transport
    */
   private createStreamableHTTPTransport(config: MCPServerConfigStreamableHTTP): StreamableHTTPClientTransport {
-    const url = new URL(config.url);
+    const url = new URL(this.resolveEnvVars(config.url));
     const headers = this.resolveHeaders(config.headers);
     return new StreamableHTTPClientTransport(url, headers ? { requestInit: { headers } } : undefined);
   }
