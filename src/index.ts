@@ -8,7 +8,7 @@ export type { Facet, Attachment, ComponentRef, SpaceEvent } from './types';
 
 // Core client/server
 export { ConnectomeClient, type ConnectomeClientConfig, type SubscriptionOptions, type FacetDelta, type FrameResult, type HealthStatus } from './client';
-export { ConnectomeServer, type ConnectomeServerConfig, type ConnectomeServiceHandlers } from './server';
+export { ConnectomeServer, type ConnectomeServerConfig, type ConnectomeServiceHandlers, type TlsConfig } from './server';
 
 // Serialization helpers
 export {

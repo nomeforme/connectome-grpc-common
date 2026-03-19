@@ -6,6 +6,7 @@
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
 import { join } from 'path';
+import { readFileSync } from 'fs';
 import { EventEmitter } from 'events';
 
 import {
@@ -35,6 +36,8 @@ export interface ConnectomeClientConfig {
   keepaliveTimeoutMs?: number;
   /** Default request deadline in ms (default: 30000) */
   defaultDeadlineMs?: number;
+  /** TLS configuration. If provided, enables mTLS. */
+  tls?: { caCertPath?: string; certPath?: string; keyPath?: string };
 }
 
 /**
@@ -88,7 +91,7 @@ export interface HealthStatus {
  * Connectome gRPC Client
  */
 export class ConnectomeClient extends EventEmitter {
-  private config: Required<ConnectomeClientConfig>;
+  private config: Required<Omit<ConnectomeClientConfig, 'tls'>> & Pick<ConnectomeClientConfig, 'tls'>;
   private client: any;
   private connected: boolean = false;
   private reconnecting: boolean = false;
@@ -143,9 +146,20 @@ export class ConnectomeClient extends EventEmitter {
       'grpc.max_receive_message_length': 64 * 1024 * 1024, // 64MB
     };
 
+    // Build client credentials (mTLS or insecure)
+    let creds: grpc.ChannelCredentials;
+    if (this.config.tls?.caCertPath && this.config.tls?.certPath && this.config.tls?.keyPath) {
+      const caCert = readFileSync(this.config.tls.caCertPath);
+      const cert = readFileSync(this.config.tls.certPath);
+      const key = readFileSync(this.config.tls.keyPath);
+      creds = grpc.credentials.createSsl(caCert, key, cert);
+    } else {
+      creds = grpc.credentials.createInsecure();
+    }
+
     this.client = new ConnectomeService(
       address,
-      grpc.credentials.createInsecure(),
+      creds,
       channelOptions
     );
 

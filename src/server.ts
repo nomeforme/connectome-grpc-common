@@ -6,6 +6,7 @@
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
 import { join } from 'path';
+import { readFileSync } from 'fs';
 import { EventEmitter } from 'events';
 
 import {
@@ -72,10 +73,21 @@ class BufferedDeltaWriter {
 /**
  * Server configuration
  */
+export interface TlsConfig {
+  /** Path to CA certificate (PEM) */
+  caCertPath?: string;
+  /** Path to server/client certificate (PEM) */
+  certPath?: string;
+  /** Path to server/client private key (PEM) */
+  keyPath?: string;
+}
+
 export interface ConnectomeServerConfig {
   port?: number;
   host?: string;
   maxConcurrentStreams?: number;
+  /** TLS configuration. If provided, enables mTLS. */
+  tls?: TlsConfig;
 }
 
 /**
@@ -152,7 +164,7 @@ export interface ConnectomeServiceHandlers {
  * Connectome gRPC Server
  */
 export class ConnectomeServer extends EventEmitter {
-  private config: Required<ConnectomeServerConfig>;
+  private config: Required<Omit<ConnectomeServerConfig, 'tls'>> & Pick<ConnectomeServerConfig, 'tls'>;
   private server: grpc.Server | null = null;
   private handlers: ConnectomeServiceHandlers | null = null;
   private activeSubscriptions: Map<string, { cancel: () => void }> = new Map();
@@ -163,7 +175,8 @@ export class ConnectomeServer extends EventEmitter {
     this.config = {
       port: config.port || 50051,
       host: config.host || '0.0.0.0',
-      maxConcurrentStreams: config.maxConcurrentStreams || 500
+      maxConcurrentStreams: config.maxConcurrentStreams || 500,
+      tls: config.tls,
     };
   }
 
@@ -220,10 +233,22 @@ export class ConnectomeServer extends EventEmitter {
 
     const address = `${this.config.host}:${this.config.port}`;
 
+    // Build server credentials (mTLS or insecure)
+    let credentials: grpc.ServerCredentials;
+    if (this.config.tls?.caCertPath && this.config.tls?.certPath && this.config.tls?.keyPath) {
+      const caCert = readFileSync(this.config.tls.caCertPath);
+      const cert = readFileSync(this.config.tls.certPath);
+      const key = readFileSync(this.config.tls.keyPath);
+      credentials = grpc.ServerCredentials.createSsl(caCert, [{ cert_chain: cert, private_key: key }], true);
+      console.log('[ConnectomeServer] mTLS enabled');
+    } else {
+      credentials = grpc.ServerCredentials.createInsecure();
+    }
+
     return new Promise((resolve, reject) => {
       this.server!.bindAsync(
         address,
-        grpc.ServerCredentials.createInsecure(),
+        credentials,
         (error, port) => {
           if (error) {
             reject(new Error(`Failed to bind server: ${error.message}`));
