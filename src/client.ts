@@ -566,6 +566,42 @@ export class ConnectomeClient extends EventEmitter {
   }
 
   /**
+   * Get frames by sequence range, optionally filtered by stream
+   */
+  async getFrames(options?: {
+    fromSequence?: number;
+    toSequence?: number;
+    limit?: number;
+    streamIds?: string[];
+    timeoutMs?: number;
+  }): Promise<{ frames: any[]; currentSequence: number }> {
+    return this.retryUnary(() => {
+      const deadline = this.createDeadline(options?.timeoutMs || 30000);
+      return new Promise<{ frames: any[]; currentSequence: number }>((resolve, reject) => {
+        this.client.GetFrames(
+          {
+            from_sequence: options?.fromSequence || 0,
+            to_sequence: options?.toSequence || 0,
+            limit: options?.limit || 100,
+            stream_ids: options?.streamIds || [],
+          },
+          { deadline },
+          (error: any, response: any) => {
+            if (error) {
+              reject(error);
+            } else {
+              resolve({
+                frames: response.frames || [],
+                currentSequence: response.current_sequence || 0,
+              });
+            }
+          },
+        );
+      });
+    });
+  }
+
+  /**
    * Activate an agent for a stream
    */
   async activateAgent(
