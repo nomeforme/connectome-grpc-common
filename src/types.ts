@@ -25,10 +25,18 @@ export interface Facet {
 
 /**
  * Attachment for binary data (images, files, etc.)
+ *
+ * Three transport modes (mutually exclusive in practice):
+ *  - `blobId`: sha256 ref into the content-addressed blob store (PREFERRED).
+ *    Resolve via ConnectomeClient.getBlob(id).
+ *  - `data`: inline base64 string or Uint8Array (LEGACY — kept for read-side
+ *    compatibility with historical facets). New writes should prefer blobId.
+ *  - `url`: external URL reference (rarely used).
  */
 export interface Attachment {
   id: string;
   contentType: string;
+  blobId?: string;
   data?: Uint8Array | string;
   url?: string;
   sizeBytes?: number;

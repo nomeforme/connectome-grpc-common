@@ -30,6 +30,7 @@ export interface ProtoAttachment {
   contentType: string;
   inlineData?: Uint8Array;
   url?: string;
+  blobId?: string;
   sizeBytes: number;
   filename: string;
   metadata: Record<string, string>;
@@ -201,13 +202,16 @@ function attachmentToProto(attachment: any): ProtoAttachment {
   const proto: ProtoAttachment = {
     id: attachment.id || '',
     contentType: attachment.contentType || attachment.mimeType || 'application/octet-stream',
-    sizeBytes: 0,
+    sizeBytes: attachment.sizeBytes || 0,
     filename: attachment.filename || '',
     metadata: {}
   };
 
-  // Handle inline data vs URL
-  if (attachment.data) {
+  // PREFER content-addressed blob ref (cheap to serialize, no bytes inline).
+  if (attachment.blobId) {
+    proto.blobId = attachment.blobId;
+  } else if (attachment.data) {
+    // LEGACY: inline data path. Still emitted for tests and back-compat callers.
     if (typeof attachment.data === 'string') {
       // Base64 encoded
       proto.inlineData = Uint8Array.from(atob(attachment.data), c => c.charCodeAt(0));
@@ -216,10 +220,9 @@ function attachmentToProto(attachment: any): ProtoAttachment {
     } else if (Buffer.isBuffer(attachment.data)) {
       proto.inlineData = new Uint8Array(attachment.data);
     }
-    proto.sizeBytes = proto.inlineData?.length || 0;
+    proto.sizeBytes = proto.sizeBytes || proto.inlineData?.length || 0;
   } else if (attachment.url) {
     proto.url = attachment.url;
-    proto.sizeBytes = attachment.sizeBytes || 0;
   }
 
   // Copy metadata
@@ -242,7 +245,11 @@ function protoToAttachment(proto: ProtoAttachment): any {
     filename: proto.filename
   };
 
-  if (proto.inlineData && proto.inlineData.length > 0) {
+  // PREFER blob ref; fall back to inline bytes; finally URL.
+  // protoLoader with `oneofs:true` emits exactly one of these per attachment.
+  if (proto.blobId) {
+    attachment.blobId = proto.blobId;
+  } else if (proto.inlineData && proto.inlineData.length > 0) {
     attachment.data = proto.inlineData;
   } else if (proto.url) {
     attachment.url = proto.url;

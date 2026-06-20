@@ -654,6 +654,115 @@ export class ConnectomeClient extends EventEmitter {
   }
 
   /**
+   * Upload a binary blob to the content-addressed store.
+   *
+   * Wire path: client-streams (header, chunk, chunk, ...) in 256 KB segments
+   * so individual gRPC messages stay well under the 64 MB cap. Returns the
+   * sha256 `blobId` (idempotent — same bytes always produce the same id).
+   *
+   * Use this for any large payload (image/video/file). Embed the returned id
+   * in your facet via `Attachment.blobId`, never the bytes themselves.
+   */
+  async putBlob(
+    bytes: Uint8Array | Buffer,
+    options: { contentType: string; filename?: string; timeoutMs?: number } = { contentType: 'application/octet-stream' }
+  ): Promise<{ blobId: string; sizeBytes: number; alreadyExisted: boolean }> {
+    const payload = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const CHUNK = 256 * 1024;
+
+    return new Promise<{ blobId: string; sizeBytes: number; alreadyExisted: boolean }>((resolve, reject) => {
+      const deadline = this.createDeadline(options.timeoutMs || 120_000);
+      const stream = this.client.PutBlob({ deadline }, (error: any, response: any) => {
+        if (error) {
+          if (error.code === grpc.status.DEADLINE_EXCEEDED) {
+            console.error('[ConnectomeClient] PutBlob timed out');
+          }
+          reject(error);
+        } else {
+          resolve({
+            blobId: response.blobId,
+            sizeBytes: Number(response.sizeBytes || 0),
+            alreadyExisted: !!response.alreadyExisted
+          });
+        }
+      });
+
+      // First message: header
+      stream.write({
+        header: {
+          contentType: options.contentType,
+          filename: options.filename || '',
+          sizeBytes: payload.length
+        }
+      });
+
+      // Stream bytes in chunks
+      for (let offset = 0; offset < payload.length; offset += CHUNK) {
+        const slice = payload.subarray(offset, Math.min(offset + CHUNK, payload.length));
+        stream.write({ chunk: slice });
+      }
+      stream.end();
+    });
+  }
+
+  /**
+   * Download a binary blob by id. Server streams (header, chunk, chunk, ...);
+   * client assembles into a single Uint8Array.
+   *
+   * Throws on grpc NOT_FOUND if the blob is unknown.
+   */
+  async getBlob(
+    blobId: string,
+    options: { timeoutMs?: number } = {}
+  ): Promise<{ blobId: string; sizeBytes: number; contentType: string; filename: string; bytes: Uint8Array }> {
+    return new Promise((resolve, reject) => {
+      const deadline = this.createDeadline(options.timeoutMs || 120_000);
+      let header: { blobId: string; sizeBytes: number; contentType: string; filename: string } | null = null;
+      const buffers: Buffer[] = [];
+      let totalSize = 0;
+
+      const call = this.client.GetBlob({ blobId }, { deadline });
+
+      call.on('data', (msg: any) => {
+        if (msg.header) {
+          header = {
+            blobId: msg.header.blobId || blobId,
+            sizeBytes: Number(msg.header.sizeBytes || 0),
+            contentType: msg.header.contentType || 'application/octet-stream',
+            filename: msg.header.filename || ''
+          };
+        } else if (msg.chunk) {
+          const buf = Buffer.isBuffer(msg.chunk) ? msg.chunk : Buffer.from(msg.chunk);
+          buffers.push(buf);
+          totalSize += buf.length;
+        }
+      });
+
+      call.on('end', () => {
+        if (!header) {
+          reject(new Error(`GetBlob ${blobId}: stream ended without header`));
+          return;
+        }
+        const assembled = buffers.length === 1 ? buffers[0] : Buffer.concat(buffers, totalSize);
+        resolve({
+          blobId: header.blobId,
+          sizeBytes: header.sizeBytes,
+          contentType: header.contentType,
+          filename: header.filename,
+          bytes: new Uint8Array(assembled)
+        });
+      });
+
+      call.on('error', (error: any) => {
+        if (error.code === grpc.status.DEADLINE_EXCEEDED) {
+          console.error(`[ConnectomeClient] GetBlob ${blobId} timed out`);
+        }
+        reject(error);
+      });
+    });
+  }
+
+  /**
    * Retry a unary RPC with exponential backoff on transient errors
    */
   private async retryUnary<T>(

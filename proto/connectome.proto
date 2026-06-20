@@ -36,6 +36,15 @@ service ConnectomeService {
 
   // Activate an agent for a stream
   rpc ActivateAgent(ActivateAgentRequest) returns (ActivationResult);
+
+  // Upload a binary blob to the content-addressed store.
+  // Client-streams the file in chunks; first chunk carries the header.
+  // Returns the sha256 blob_id (idempotent — same bytes = same id).
+  rpc PutBlob(stream PutBlobChunk) returns (PutBlobResult);
+
+  // Download a binary blob by id. Server-streams chunks.
+  // First message carries the header; subsequent messages carry chunks.
+  rpc GetBlob(GetBlobRequest) returns (stream BlobChunk);
 }
 
 // ============================================
@@ -159,12 +168,54 @@ message Attachment {
   string id = 1;
   string content_type = 2;
   oneof data {
-    bytes inline_data = 3;  // Small attachments inline
-    string url = 4;         // Large attachments as URL
+    bytes inline_data = 3;  // Legacy: small attachments inline (deprecated for writes, still read)
+    string url = 4;         // Optional external URL reference
+    string blob_id = 8;     // sha256 of bytes, resolves via GetBlob (preferred)
   }
   int64 size_bytes = 5;
   string filename = 6;
   map<string, string> metadata = 7;
+}
+
+// ============================================
+// BLOBS — content-addressed binary store
+// ============================================
+
+message PutBlobChunk {
+  oneof payload {
+    PutBlobHeader header = 1;  // First message of stream
+    bytes chunk = 2;           // Subsequent messages
+  }
+}
+
+message PutBlobHeader {
+  string content_type = 1;
+  string filename = 2;
+  int64 size_bytes = 3;  // Advisory; not authoritative
+}
+
+message PutBlobResult {
+  string blob_id = 1;         // sha256 hex (64 chars)
+  int64 size_bytes = 2;
+  bool already_existed = 3;   // True if dedup hit
+}
+
+message GetBlobRequest {
+  string blob_id = 1;
+}
+
+message BlobChunk {
+  oneof payload {
+    BlobHeader header = 1;  // First message of stream
+    bytes chunk = 2;        // Subsequent messages
+  }
+}
+
+message BlobHeader {
+  string blob_id = 1;
+  int64 size_bytes = 2;
+  string content_type = 3;
+  string filename = 4;
 }
 
 // ============================================

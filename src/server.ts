@@ -158,7 +158,31 @@ export interface ConnectomeServiceHandlers {
     activationId: string;
     error?: string;
   }>;
+
+  /**
+   * Store a blob in the content-addressed store. Returns the sha256 id.
+   * `header` carries content-type / filename / size hint; `bytes` is the assembled buffer.
+   */
+  putBlob: (header: { contentType: string; filename: string; sizeBytes: number }, bytes: Uint8Array) => Promise<{
+    blobId: string;
+    sizeBytes: number;
+    alreadyExisted: boolean;
+  }>;
+
+  /**
+   * Retrieve a blob by id. Returns header + bytes. Throws if not found.
+   */
+  getBlob: (request: { blobId: string }) => Promise<{
+    blobId: string;
+    sizeBytes: number;
+    contentType: string;
+    filename: string;
+    bytes: Uint8Array;
+  }>;
 }
+
+/** Chunk size for streaming blobs over gRPC. 256 KB keeps each message well under the 64 MB cap. */
+export const BLOB_CHUNK_SIZE = 256 * 1024;
 
 /**
  * Connectome gRPC Server
@@ -228,7 +252,9 @@ export class ConnectomeServer extends EventEmitter {
       CreateStream: this.handleCreateStream.bind(this),
       GetStateSnapshot: this.handleGetStateSnapshot.bind(this),
       GetFrames: this.handleGetFrames.bind(this),
-      ActivateAgent: this.handleActivateAgent.bind(this)
+      ActivateAgent: this.handleActivateAgent.bind(this),
+      PutBlob: this.handlePutBlob.bind(this),
+      GetBlob: this.handleGetBlob.bind(this)
     });
 
     const address = `${this.config.host}:${this.config.port}`;
@@ -525,6 +551,113 @@ export class ConnectomeServer extends EventEmitter {
         code: grpc.status.INTERNAL,
         message: error.message
       });
+    }
+  }
+
+  /**
+   * Handle PutBlob RPC (client-streaming).
+   *
+   * Wire format: first chunk carries `header`, subsequent chunks carry `chunk`
+   * (raw bytes). Server assembles, computes sha256, returns the blob_id.
+   * The 256 KB per-message chunk size keeps individual messages well below
+   * the 64 MB gRPC cap regardless of total blob size.
+   */
+  private handlePutBlob(
+    call: grpc.ServerReadableStream<any, any>,
+    callback: grpc.sendUnaryData<any>
+  ): void {
+    let header: { contentType: string; filename: string; sizeBytes: number } | null = null;
+    const buffers: Buffer[] = [];
+    let totalSize = 0;
+
+    call.on('data', (chunk: any) => {
+      // protoLoader with oneofs:true sets `payload` to the active variant name
+      if (chunk.header) {
+        header = {
+          contentType: chunk.header.contentType || 'application/octet-stream',
+          filename: chunk.header.filename || '',
+          sizeBytes: Number(chunk.header.sizeBytes || 0)
+        };
+      } else if (chunk.chunk) {
+        const buf = Buffer.isBuffer(chunk.chunk) ? chunk.chunk : Buffer.from(chunk.chunk);
+        buffers.push(buf);
+        totalSize += buf.length;
+      }
+    });
+
+    call.on('end', async () => {
+      try {
+        if (!header) {
+          callback({ code: grpc.status.INVALID_ARGUMENT, message: 'PutBlob: header missing' });
+          return;
+        }
+        if (buffers.length === 0) {
+          callback({ code: grpc.status.INVALID_ARGUMENT, message: 'PutBlob: no bytes received' });
+          return;
+        }
+
+        const assembled = buffers.length === 1 ? buffers[0] : Buffer.concat(buffers, totalSize);
+        const result = await this.handlers!.putBlob(header, new Uint8Array(assembled));
+
+        callback(null, {
+          blobId: result.blobId,
+          sizeBytes: result.sizeBytes,
+          alreadyExisted: result.alreadyExisted
+        });
+      } catch (error: any) {
+        callback({ code: grpc.status.INTERNAL, message: error.message });
+      }
+    });
+
+    call.on('error', (error: any) => {
+      console.error('[ConnectomeServer] PutBlob stream error:', error.message);
+    });
+  }
+
+  /**
+   * Handle GetBlob RPC (server-streaming).
+   *
+   * Sends one header message first, then bytes in chunks of BLOB_CHUNK_SIZE.
+   */
+  private async handleGetBlob(
+    call: grpc.ServerWritableStream<any, any>
+  ): Promise<void> {
+    try {
+      const blobId = call.request.blobId;
+      if (!blobId) {
+        call.emit('error', { code: grpc.status.INVALID_ARGUMENT, message: 'GetBlob: blob_id missing' });
+        return;
+      }
+
+      const result = await this.handlers!.getBlob({ blobId });
+
+      // First message: header
+      call.write({
+        header: {
+          blobId: result.blobId,
+          sizeBytes: result.sizeBytes,
+          contentType: result.contentType,
+          filename: result.filename
+        }
+      });
+
+      // Subsequent messages: byte chunks
+      const bytes = result.bytes;
+      for (let offset = 0; offset < bytes.length; offset += BLOB_CHUNK_SIZE) {
+        const slice = bytes.subarray(offset, Math.min(offset + BLOB_CHUNK_SIZE, bytes.length));
+        // Respect backpressure: if write returns false, wait for drain
+        const ok = call.write({ chunk: slice });
+        if (!ok) {
+          await new Promise<void>((resolve) => call.once('drain', () => resolve()));
+        }
+      }
+      call.end();
+    } catch (error: any) {
+      // grpc.status.NOT_FOUND if the BlobStore reports a missing blob
+      const code = /not.*found|enoent/i.test(error.message || '')
+        ? grpc.status.NOT_FOUND
+        : grpc.status.INTERNAL;
+      call.emit('error', { code, message: error.message });
     }
   }
 
